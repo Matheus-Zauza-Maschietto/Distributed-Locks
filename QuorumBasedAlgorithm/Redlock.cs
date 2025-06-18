@@ -11,40 +11,59 @@ public class Redlock
 private readonly List<IDatabase> _redisDbs;
     private readonly TimeSpan _lockExpiry;
     private readonly int _quorum;
+    private readonly TimeSpan _timeout;
 
-    public Redlock(List<IDatabase> redisDbs, TimeSpan lockExpiry)
+    public Redlock(List<IDatabase> redisDbs, TimeSpan lockExpiry, TimeSpan timeout)
     {
         _redisDbs = redisDbs;
         _lockExpiry = lockExpiry;
+        _timeout = timeout;
         _quorum = (redisDbs.Count / 2) + 1;
     }
 
+
+
     public async Task<string> AcquireLockAsync(string resource)
     {
-        var lockId = Guid.NewGuid().ToString();
-        var startTime = DateTime.UtcNow;
-        int successCount = 0;
-
-        foreach (var db in _redisDbs)
+        try
         {
-            try
+            var token = new CancellationTokenSource(_timeout).Token;
+            var lockId = Guid.NewGuid().ToString();
+            var startTime = DateTime.UtcNow;
+            int successCount = 0;
+
+            foreach (var db in _redisDbs)
             {
-                bool acquired = await db.StringSetAsync(resource, lockId, _lockExpiry, When.NotExists);
-                if (acquired)
-                    successCount++;
+                try
+                {
+                    bool acquired = await db.StringSetAsync(resource, lockId, _lockExpiry, When.NotExists);
+                    if (acquired)
+                        successCount++;
+                }
+                catch { }
+                token.ThrowIfCancellationRequested();
             }
-            catch {}
-        }
 
-        var elapsed = DateTime.UtcNow - startTime;
+            var elapsed = DateTime.UtcNow - startTime;
 
-        if (successCount >= _quorum && elapsed < _lockExpiry)
-        {
-            return lockId;
+            token.ThrowIfCancellationRequested();
+            if (successCount >= _quorum && elapsed < _lockExpiry)
+            {
+                return lockId;
+            }
+            else
+            {
+                await ReleaseLockAsync(resource, lockId);
+                return null;
+            }
         }
-        else
+        catch (OperationCanceledException)
         {
-            await ReleaseLockAsync(resource, lockId);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error acquiring lock: {ex.Message}");
             return null;
         }
     }
